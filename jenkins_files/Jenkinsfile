@@ -1,0 +1,672 @@
+/* groovylint-disable CompileStatic, CouldBeElvis, DuplicateNumberLiteral, GStringExpressionWithinString, InvertedIfElse, NestedBlockDepth, NglParseError, NoDef, UnnecessaryObjectReferences, VariableTypeRequired */
+// Env Vars
+def envType = 'work'
+def genericCred = 'databricks_ci_cd'
+def sonarTokenId = 'databricks-sonar-token'
+def gitRepoName = '103519-ONPREM-TO-S3-LIB-MOVEMENT'
+def gitUrl = "https://scm.mastercard.int/stash/scm/eda-550/${gitRepoName}.git"
+def sonarProjectKey = "${gitRepoName}-${envType}"
+def sonarProjectName = "${gitRepoName}-${envType}"
+def awsCliFileName = 'awscli-v2.24.3.zip'
+def fileListingFile = 'onprem-to-s3-lib/libraries_list/files.json'
+def python310LibListingFile = 'onprem-to-s3-lib/libraries_list/python_310_package_registry.json'
+def python311LibListingFile = 'onprem-to-s3-lib/libraries_list/python_311_package_registry.json'
+def python312LibListingFile = 'onprem-to-s3-lib/libraries_list/python_312_package_registry.json'
+def libDirs = 'onprem-to-s3-lib/libs'
+def artDirs = 'onprem-to-s3-lib/art'
+
+pipeline {
+    agent {
+        label 'lstl2jnk8993'
+    }
+
+    environment {
+
+        // BitBucket
+        GENERIC_CRED = "${genericCred}"
+        GIT_URL = "${gitUrl}".replace('fusion.mastercard.int', 'scm.mastercard.int').replace('globalrepository.mclocal.int', 'scm.mastercard.int')
+        GIT_BRANCH = "${envType}"
+
+        // Sonar
+        SONAR_PROJECT_KEY = "${sonarProjectKey}"
+        SONAR_PROJECT_NAME = "${sonarProjectName}"
+
+        // AWS CLI
+        AWS_CLI_FILE_NAME = "${awsCliFileName}"
+        AWS_CLI_PATH = '~/.local/bin/aws'
+        DATABRICKS_TARGET_ENV = "${envType}"
+
+        // Libs
+        FILE_LISTING_FILE = "${fileListingFile}"
+        PYTHON_310_LIB_LISTING_FILE = "${python310LibListingFile}"
+        PYTHON_311_LIB_LISTING_FILE = "${python311LibListingFile}"
+        PYTHON_312_LIB_LISTING_FILE = "${python312LibListingFile}"
+        LIBS_DIR = "${libDirs}"
+        ART_DIR = "${artDirs}"
+    }
+
+    stages {
+        stage('Git Checkout') {
+            steps {
+                dir('onprem-to-s3-lib') {
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "${GIT_BRANCH}"]],
+                        userRemoteConfigs: [[credentialsId: "${GENERIC_CRED}", url:"${GIT_URL}"]]
+                    ])
+                }
+            }
+        }
+
+        stage('Parse CICD Config JSON') {
+            steps {
+                script {
+                    // Read and parse config file
+                    def configParam = readJSON file: 'onprem-to-s3-lib/config/cicd-runtime-config.json'
+                    def configFile = readJSON file: 'onprem-to-s3-lib/config/cicd-pipeline-config.json'
+
+                    echo "Config: ${configParam}"               // One-liner string version
+                    echo groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(configParam))
+
+                    echo "Config: ${configFile}"               // One-liner string version
+                    echo groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(configFile))
+
+                    echo "Sonar project version: ${configFile.sonar_project_version}"
+
+                    // Extract values from configParam
+                    env.run_artifact_migration = configParam.run_artifact_migration
+                    env.run_310_lib_migration = configParam.run_310_lib_migration
+                    env.run_311_lib_migration = configParam.run_311_lib_migration
+                    env.run_312_lib_migration = configParam.run_312_lib_migration
+
+                    // Extract values from configFile
+                    env.SONAR_PROJECT_VERSION = configFile.sonar_project_version
+                    echo "Sonar project version from env: ${env.SONAR_PROJECT_VERSION}"
+                    env.SONAR_QUALITY_GATE = configFile.sonar_quality_gate
+                   
+
+                    env.ARTIFACTORY_BUILD_VERSION = configFile.artifactory_build_version
+
+                    env.PYPI_INDEX_URL = configFile.pypi_index_url
+                    env.PYPI_TRUSTED_HOST = configFile.pypi_trusted_host
+
+                    env.AWS_CLI_ARTIFACTORY_URL = configFile.aws_cli_artifactory_url
+
+                    env.HC_VAULT_APP_ROLE_CRED = configFile.hcvault_approle_credid
+                    env.HC_VAULT_VERSION = configFile.hcvault_key_version
+                    env.HC_VAULT_SECRET_NAME = configFile.hcVault_secret_name
+
+                    env.AWS_REGION = configFile.aws_region
+                    env.AWS_ROLE_ARN = configFile.aws_role_arn
+                    env.STS_ENDPOINT = configFile.aws_sts_endpoint
+                    env.VPC_ENDPOINT = configFile.aws_vpc_endpoint
+
+                    env.DESTINATION_BUCKET_LIB = configFile.destination_bucket_lib
+                    env.DESTINATION_BUCKET_ART = configFile.destination_bucket_art
+                    env.DESTINATION_FOLDER_LIB_310 = configFile.destination_folder_lib_310
+                    env.DESTINATION_FOLDER_LIB_311 = configFile.destination_folder_lib_311
+                    env.DESTINATION_FOLDER_LIB_312 = configFile.destination_folder_lib_312
+                    env.DESTINATION_FOLDER_ART = configFile.destination_folder_art
+
+                    env.NOTIFICATION_MAIL_ID = configFile.notification_mail_id
+                }
+            }
+        }
+
+        stage('Validate Variables') {
+            steps {
+                script {
+                    if (SONAR_PROJECT_VERSION.trim() == '') {
+                        error 'The environment variable SONAR_PROJECT_VERSION is empty!'
+                    }
+                    if (SONAR_QUALITY_GATE.trim() == '') {
+                        error 'The environment variable SONAR_QUALITY_GATE is empty!'
+                    }
+                    if (ARTIFACTORY_BUILD_VERSION.trim() == '') {
+                        error 'The environment variable ARTIFACTORY_BUILD_VERSION is empty!'
+                    }
+                    if (AWS_CLI_ARTIFACTORY_URL.trim() == '') {
+                        error 'The environment variable AWS_CLI_ARTIFACTORY_URL is empty!'
+                    }
+                    if (PYPI_INDEX_URL.trim() == '') {
+                        error 'The environment variable PYPI_INDEX_URL is empty!'
+                    }
+                    if (PYPI_TRUSTED_HOST.trim() == '') {
+                        error 'The environment variable PYPI_TRUSTED_HOST is empty!'
+                    }
+                    if (HC_VAULT_APP_ROLE_CRED.trim() == '') {
+                        error 'The environment variable HC_VAULT_APP_ROLE_CRED is empty!'
+                    }
+                    if (HC_VAULT_VERSION.trim() == '') {
+                        error 'The environment variable HC_VAULT_VERSION is empty!'
+                    }
+                    if (HC_VAULT_SECRET_NAME.trim() == '') {
+                        error 'The environment variable HC_VAULT_SECRET_NAME is empty!'
+                    }
+                    if (AWS_REGION.trim() == '') {
+                        error 'The environment variable AWS_REGION is empty!'
+                    }
+                    if (AWS_ROLE_ARN.trim() == '') {
+                        error 'The environment variable AWS_ROLE_ARN is empty!'
+                    }
+                    if (STS_ENDPOINT.trim() == '') {
+                        error 'The environment variable STS_ENDPOINT is empty!'
+                    }
+                    if (VPC_ENDPOINT.trim() == '') {
+                        error 'The environment variable VPC_ENDPOINT is empty!'
+                    }
+                    if (NOTIFICATION_MAIL_ID.trim() == '') {
+                        error 'The environment variable NOTIFICATION_MAIL_ID is empty!'
+                    }
+                    // Check for Secured URL format (https://)
+                    // Collect all URL parameters in a list
+                    def urls = [
+                        [name: 'gitUrl', value: gitUrl],
+                        [name: 'aws_cli_artifactory_url', value: aws_cli_artifactory_url]
+                    ]
+                    // Check if each URL starts with 'https://'
+                    urls.each { url ->
+                        if (!url.value.startsWith('https://')) {
+                            error "Invalid URL for ${url.name}: ${url.value} (must start with 'https://')"
+                        } else {
+                            echo "Valid URL for ${url.name}: ${url.value}"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    // Fetch the current Git branch name
+                    def currentBranch = env.GIT_BRANCH
+                    if (!currentBranch) {
+                        currentBranch = sh(script: 'cd ./onprem-to-s3-lib && git branch --show-current || git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+                    }
+                    echo "Current branch is ${currentBranch}"
+
+                    // Set currentBranch as env var so it can be used in single-quoted sh block
+                    env.CURRENT_BRANCH = currentBranch
+
+                    // Use usernamePassword credential — the SonarQube user token must be stored
+                    // in the PASSWORD field of the Jenkins credential.
+                    // Single-quoted sh block prevents Groovy string interpolation of secrets.
+                    // sonar.login/sonar.password is deprecated in SonarQube 2025.1+; use sonar.token instead.
+                    withCredentials([string(credentialsId: "${sonarTokenId}", variable: 'SONAR_TOKEN')]) {
+                        sh '''
+                            > dependency-check-report.html
+                            > dependency-check-report.json
+                            sonar-scanner -X \
+                                -Dsonar.token="$SONAR_TOKEN" \
+                                -Dsonar.branch.name="$CURRENT_BRANCH" \
+                                -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+                                -Dsonar.projectName="$SONAR_PROJECT_NAME" \
+                                -Dsonar.projectVersion="$SONAR_PROJECT_VERSION" \
+                                -Dsonar.qualityGateId="$SONAR_QUALITY_GATE"
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Fetch AWS Credential from HC Vault') {
+            steps
+            {
+                script {
+                    withCredentials([usernamePassword(credentialsId: HC_VAULT_APP_ROLE_CRED, usernameVariable: 'APPROLEID', passwordVariable: 'APPROLESECRET')]) {
+                        // Step 1: Run the First cURL Command to Get the 'client_token'
+                        def clientTokenApiResponse = sh(script: """
+                        curl -H 'Content-Type: application/json' --insecure --request POST --data '{"role_id": "$APPROLEID","secret_id": "$APPROLESECRET"}' https://prod.stl.vault.mastercard.int:8200/v1/auth/approle/login
+                        """, returnStdout: true).trim()
+
+                        // Step 2: Parse the JSON response
+                        def jsonResponseClientToken = readJSON text: clientTokenApiResponse
+
+                        // Step 3: Get Client Token
+                        def clientToken = jsonResponseClientToken.auth.client_token // Extract the 'client_token' value
+                        echo "Client Token: ${clientToken}"
+
+                        // Step 4: Run the Second cURL Command to List the 'secret'
+                        def listSecretApiResponse = sh(script: """
+                        curl -H \"X-Vault-Token: $clientToken\" --request LIST https://prod.stl.vault.mastercard.int:8200/v1/EDA_CLOUD_DBX_WORK/metadata
+                        """, returnStdout: true).trim()
+
+                        echo "List: ${listSecretApiResponse}"
+
+                        // Step 5: Run the Second cURL Command to Get the 'secret'
+                        def secretApiResponse = sh(script: """
+                        curl -H \"X-Vault-Token: $clientToken\" --request GET https://prod.stl.vault.mastercard.int:8200/v1/EDA_CLOUD_DBX_WORK/data/mc-$DATABRICKS_TARGET_ENV?version=$HC_VAULT_VERSION
+                        """, returnStdout: true).trim()
+
+                        // Step 6: Parse the JSON response
+                        def jsonResponseSecret = readJSON text: secretApiResponse
+
+                        // Step 7: Get Secret Value
+                        env.AWS_ACCESS_KEY_ID = "${jsonResponseSecret.data.data.aws_access_key}"
+                        env.AWS_SECRET_ACCESS_KEY = "${jsonResponseSecret.data.data.aws_secret_key}"
+                    }
+                }
+            }
+        }
+
+        stage('AWS CLI Setup') {
+            steps {
+                script {
+                    def currentPath = sh(script: 'pwd', returnStdout: true).trim()
+                    sh """
+                    mkdir -p ${currentPath}/awscli
+                    curl -O ${AWS_CLI_ARTIFACTORY_URL}/${awsCliFileName}
+                    unzip ${awsCliFileName} -d ${currentPath}/awscli
+                    rm -rf ${awsCliFileName}
+                    cd ${currentPath}/awscli/aws
+                    ./install -i ~/.local/aws-cli -b ~/.local/bin --update
+                    ~/.local/bin/aws --version
+                    ${AWS_CLI_PATH} --version
+                    echo "--------------------------AWS CRED ENV SETUP START--------------------------"
+                    ${AWS_CLI_PATH} configure set region ${AWS_REGION}
+                    set +x
+                    export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                    export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                    export AWS_STS_ENDPOINT=${STS_ENDPOINT}
+                    set -x
+                    echo "--------------------------AWS CRED ENV SETUP END--------------------------"
+                    """
+                }
+            }
+        }
+
+        stage('Parse File List & Download Files') {
+            when {
+                expression { env.run_artifact_migration == 'true' }
+            }
+            steps {
+                script {
+                    sh "mkdir -p ${ART_DIR}"
+
+                    def fileData = readJSON file: FILE_LISTING_FILE
+
+                    // Top-level source type decides the fetch method for ALL entries in this file.
+                    //   "simple-artifactory" -> new PyPI simple artifactory, fetched via pip (package + version),
+                    //                           using artifactory_base_url as the pip index url.
+                    //   "approved-artifactory" (default) -> dsw/approved or any other direct-URL artifactory,
+                    //                           fetched via curl (artifactory_base_url + filename).
+                    def source = fileData.source ? fileData.source : 'approved-artifactory'
+
+                    def artifactoryBaseUrl = fileData.artifactory_base_url ?: ''
+                    if (artifactoryBaseUrl != '' && !artifactoryBaseUrl.endsWith('/')) {
+                        artifactoryBaseUrl = artifactoryBaseUrl + '/'
+                    }
+
+                    for (fileInfo in fileData.libraries) {
+                        // MTP approval check: every library MUST have a non-empty mtp_id before it can be pushed to the volume.
+                        def mtpId = fileInfo.mtp_id ? "${fileInfo.mtp_id}".trim() : ''
+                        if (mtpId == '') {
+                            def libIdent = fileInfo.package ? fileInfo.package : fileInfo.name
+                            error "Missing mtp_id for library '${libIdent}'. Every library must have an mtp_id to be pushed to the volume."
+                        }
+                        echo "MTP ID check passed (mtp_id=${mtpId})"
+
+                        if (source == 'simple-artifactory') {
+                            def pkg = fileInfo.package
+                            def version = fileInfo.version
+                            echo "Downloading package (simple/pip): ${pkg}==${version} from: ${artifactoryBaseUrl}"
+                            sh """
+                                /sys_apps_01/python/python3.12.5/bin/pip3.12 download ${pkg}==${version} -d ${ART_DIR} --index-url ${artifactoryBaseUrl} --trusted-host ${PYPI_TRUSTED_HOST} --no-deps
+                            """
+                        } else {
+                            def fileName = fileInfo.name
+                            def extract = fileInfo.extract.toBoolean()
+
+                            def url = artifactoryBaseUrl + fileName
+                            def filePath = "${ART_DIR}/${fileName}"
+
+                            echo "Downloading file (direct/curl): ${fileName} from: ${url}"
+                            sh "curl -s -L -o '${filePath}' '${url}'"
+
+                            if (extract) {
+                                echo "Extracting file: ${fileName}"
+                                if (fileName.endsWith('.zip')) {
+                                    sh """
+                                        unzip -q '${filePath}' -d '${ART_DIR}'
+                                        rm -f '${filePath}'
+                                    """
+                                } else if (fileName.endsWith('.tar.gz')) {
+                                    sh """
+                                        tar -xzf '${filePath}' -C '${ART_DIR}'
+                                        rm -f '${filePath}'
+                                    """
+                                }
+                            }
+                        }
+                    }
+
+                    sh """
+                        ls -la ${ART_DIR}
+                        echo "--------------------------PUSH FILES TO S3 START--------------------------"
+                        set +x
+                        CREDS=\$(${AWS_CLI_PATH} sts assume-role --role-arn ${AWS_ROLE_ARN} --role-session-name JenkinsSession --endpoint-url ${STS_ENDPOINT})
+                        export AWS_ACCESS_KEY_ID=\$(echo \$CREDS | jq -r .Credentials.AccessKeyId)
+                        export AWS_SECRET_ACCESS_KEY=\$(echo \$CREDS | jq -r .Credentials.SecretAccessKey)
+                        export AWS_SESSION_TOKEN=\$(echo \$CREDS | jq -r .Credentials.SessionToken)
+                        ${AWS_CLI_PATH} sts get-caller-identity --endpoint-url ${STS_ENDPOINT} --region us-east-1
+                        set -x
+                        find ${ART_DIR} -type f | while read file; do
+                            rel_path=\${file#${ART_DIR}/}
+                            s3_full_path="s3://${DESTINATION_BUCKET_ART}/${DESTINATION_FOLDER_ART}/\${rel_path}"
+                            if ${AWS_CLI_PATH} s3 ls "\${s3_full_path}" --endpoint-url ${VPC_ENDPOINT} --region us-east-1 > /dev/null 2>&1; then
+                                echo "File \${rel_path} already exists, skipping upload"
+                            else
+                                echo "Uploading missing file: \${rel_path}"
+                                ${AWS_CLI_PATH} s3 cp "\${file}" "\${s3_full_path}" --endpoint-url ${VPC_ENDPOINT} --region us-east-1
+                            fi
+                        done
+                        echo "--------------------------PUSH FILES TO S3 END--------------------------"
+                    """
+                }
+            }
+        }
+
+        stage('Parse Python 310 Libraries List & Download Libraries') {
+            when {
+                expression { env.run_310_lib_migration == 'true' }
+            }
+            steps {
+                script {
+                    sh "mkdir -p ${LIBS_DIR}"
+                    def packageRegistryJsonFile = readFile PYTHON_310_LIB_LISTING_FILE
+                    def packages = new groovy.json.JsonSlurper().parseText(packageRegistryJsonFile)
+
+                    sh """
+                        ls -la /sys_apps_01/python/python3.10.14/bin/
+                        export PYSPARK_PYTHON=/sys_apps_01/python/python3.10.14/bin/python
+                        export PYSPARK_DRIVER_PYTHON=/sys_apps_01/python/python3.10.14/bin/python
+                        printenv
+                        echo $PATH
+                        /sys_apps_01/python/python3.10.14/bin/pip3.10 install -r ./onprem-to-s3-lib/requirements.txt --extra-index-url ${PYPI_INDEX_URL} --trusted-host ${PYPI_TRUSTED_HOST}
+                        /sys_apps_01/python/python3.10.14/bin/pip3.10 install --upgrade wheel setuptools --extra-index-url ${PYPI_INDEX_URL} --trusted-host ${PYPI_TRUSTED_HOST}
+
+                    """
+
+                    packages.each { pkg, obj ->
+                        def version = obj.version
+                        def overwrite = obj.overwrite.toBoolean()
+                        def pkgFileGlob = "${pkg.replace('-', '_')}*${version}*"
+                        sh """
+                        rm -rf ${LIBS_DIR}/*
+                        /sys_apps_01/python/python3.10.14/bin/pip3.10 download ${pkg}==${version} -d ${LIBS_DIR} --extra-index-url ${PYPI_INDEX_URL} --trusted-host ${PYPI_TRUSTED_HOST}
+                        ls -la ${LIBS_DIR}
+                        """
+                        echo "overwrite variable: ${overwrite}"
+
+                        if (overwrite) {
+                        sh """
+                        echo "--------------------------PUSH FILES TO S3 START--------------------------"
+                        set +x
+                        CREDS=\$(${AWS_CLI_PATH} sts assume-role --role-arn ${AWS_ROLE_ARN} --role-session-name JenkinsSession --endpoint-url ${STS_ENDPOINT})
+                        export AWS_ACCESS_KEY_ID=\$(echo \$CREDS | jq -r .Credentials.AccessKeyId)
+                        export AWS_SECRET_ACCESS_KEY=\$(echo \$CREDS | jq -r .Credentials.SecretAccessKey)
+                        export AWS_SESSION_TOKEN=\$(echo \$CREDS | jq -r .Credentials.SessionToken)
+                        ${AWS_CLI_PATH} sts get-caller-identity --endpoint-url ${STS_ENDPOINT} --region us-east-1
+                        set -x
+                        ${AWS_CLI_PATH} s3 cp ${LIBS_DIR} s3://${DESTINATION_BUCKET_LIB}/${DESTINATION_FOLDER_LIB_310} --endpoint-url ${VPC_ENDPOINT} --recursive --region us-east-1
+                        echo "--------------------------PUSH FILES TO S3 END--------------------------"
+                        """
+                        } else {
+                                def rawOutput = sh(
+                                    script: "ls ${LIBS_DIR}/${pkgFileGlob} 2>/dev/null || true",
+                                    returnStdout: true
+                                )
+                                // Check if package already exists
+                                def lsOutput = rawOutput.trim()
+                                def foundFiles = lsOutput.split('\n').findAll { it.trim() != '' }
+                                def localFileName = foundFiles[0]
+                                def s3Key = localFileName.substring(localFileName.lastIndexOf('/') + 1)
+                                def s3FullPath = "s3://${DESTINATION_BUCKET_LIB}/${DESTINATION_FOLDER_LIB_310}/${s3Key}"
+                                sh """
+                                echo "--------------------------PUSH FILES TO S3 START--------------------------"
+                                set +x
+                                CREDS=\$(${AWS_CLI_PATH} sts assume-role --role-arn ${AWS_ROLE_ARN} --role-session-name JenkinsSession --endpoint-url ${STS_ENDPOINT})
+                                export AWS_ACCESS_KEY_ID=\$(echo \$CREDS | jq -r .Credentials.AccessKeyId)
+                                export AWS_SECRET_ACCESS_KEY=\$(echo \$CREDS | jq -r .Credentials.SecretAccessKey)
+                                export AWS_SESSION_TOKEN=\$(echo \$CREDS | jq -r .Credentials.SessionToken)
+                                set -x
+                                ${AWS_CLI_PATH} sts get-caller-identity --endpoint-url ${STS_ENDPOINT} --region us-east-1
+                                S3_OUTPUT=\$(${AWS_CLI_PATH} s3 ls ${s3FullPath} --endpoint-url ${VPC_ENDPOINT} --region us-east-1 2>&1 || true)
+                                if echo "\$S3_OUTPUT" | grep -q "${s3Key}"; then
+                                    echo "Package ${s3Key} already exists, skipping upload"
+                                else
+                                    ${AWS_CLI_PATH} s3 cp ${LIBS_DIR} s3://${DESTINATION_BUCKET_LIB}/${DESTINATION_FOLDER_LIB_310} --endpoint-url ${VPC_ENDPOINT} --recursive --region us-east-1
+                                fi
+                                echo "--------------------------PUSH FILES TO S3 END--------------------------"
+                                """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Parse Python 311 Libraries List & Download Libraries') {
+            when {
+                expression { env.run_311_lib_migration == 'true' }
+            }
+            steps {
+                script {
+                    def packageRegistryJsonFile = readFile PYTHON_311_LIB_LISTING_FILE
+                    def packages = new groovy.json.JsonSlurper().parseText(packageRegistryJsonFile)
+
+                    sh """
+                        ls -la /sys_apps_01/python/python3.11.1/bin/
+                        export PYSPARK_PYTHON=/sys_apps_01/python/python3.11.1/bin/python
+                        export PYSPARK_DRIVER_PYTHON=/sys_apps_01/python/python3.11.1/bin/python
+                        printenv
+                        echo $PATH
+                        /sys_apps_01/python/python3.11.1/bin/pip3.11 install -r ./onprem-to-s3-lib/requirements.txt --extra-index-url ${PYPI_INDEX_URL} --trusted-host ${PYPI_TRUSTED_HOST}
+                        /sys_apps_01/python/python3.11.1/bin/pip3.11 install --upgrade wheel setuptools --extra-index-url ${PYPI_INDEX_URL} --trusted-host ${PYPI_TRUSTED_HOST}
+
+                    """
+
+                    packages.each { pkg, obj ->
+                        def version = obj.version
+                        def overwrite = obj.overwrite.toBoolean()
+                        def pkgFileGlob = "${pkg.replace('-', '_')}*${version}*"
+                        sh """
+                        rm -rf ${LIBS_DIR}/*
+                        /sys_apps_01/python/python3.11.1/bin/pip3.11 download ${pkg}==${version} -d ${LIBS_DIR} --extra-index-url ${PYPI_INDEX_URL} --trusted-host ${PYPI_TRUSTED_HOST}
+                        ls -la ${LIBS_DIR}
+                        """
+                        echo "overwrite variable: ${overwrite}"
+
+                        if (overwrite) {
+                        sh """
+                        echo "--------------------------PUSH FILES TO S3 START--------------------------"
+                        set +x
+                        CREDS=\$(${AWS_CLI_PATH} sts assume-role --role-arn ${AWS_ROLE_ARN} --role-session-name JenkinsSession --endpoint-url ${STS_ENDPOINT})
+                        export AWS_ACCESS_KEY_ID=\$(echo \$CREDS | jq -r .Credentials.AccessKeyId)
+                        export AWS_SECRET_ACCESS_KEY=\$(echo \$CREDS | jq -r .Credentials.SecretAccessKey)
+                        export AWS_SESSION_TOKEN=\$(echo \$CREDS | jq -r .Credentials.SessionToken)
+                        ${AWS_CLI_PATH} sts get-caller-identity --endpoint-url ${STS_ENDPOINT} --region us-east-1
+                        set -x
+                        ${AWS_CLI_PATH} s3 cp ${LIBS_DIR} s3://${DESTINATION_BUCKET_LIB}/${DESTINATION_FOLDER_LIB_311} --endpoint-url ${VPC_ENDPOINT} --recursive --region us-east-1
+                        echo "--------------------------PUSH FILES TO S3 END--------------------------"
+                        """
+                        } else {
+                                def rawOutput = sh(
+                                    script: "ls ${LIBS_DIR}/${pkgFileGlob} 2>/dev/null || true",
+                                    returnStdout: true
+                                )
+                                // Check if package already exists
+                                def lsOutput = rawOutput.trim()
+                                def foundFiles = lsOutput.split('\n').findAll { it.trim() != '' }
+                                def localFileName = foundFiles[0]
+                                def s3Key = localFileName.substring(localFileName.lastIndexOf('/') + 1)
+                                def s3FullPath = "s3://${DESTINATION_BUCKET_LIB}/${DESTINATION_FOLDER_LIB_311}/${s3Key}"
+                                sh """
+                                echo "--------------------------PUSH FILES TO S3 START--------------------------"
+                                set +x
+                                CREDS=\$(${AWS_CLI_PATH} sts assume-role --role-arn ${AWS_ROLE_ARN} --role-session-name JenkinsSession --endpoint-url ${STS_ENDPOINT})
+                                export AWS_ACCESS_KEY_ID=\$(echo \$CREDS | jq -r .Credentials.AccessKeyId)
+                                export AWS_SECRET_ACCESS_KEY=\$(echo \$CREDS | jq -r .Credentials.SecretAccessKey)
+                                export AWS_SESSION_TOKEN=\$(echo \$CREDS | jq -r .Credentials.SessionToken)
+                                set -x
+                                ${AWS_CLI_PATH} sts get-caller-identity --endpoint-url ${STS_ENDPOINT} --region us-east-1
+                                S3_OUTPUT=\$(${AWS_CLI_PATH} s3 ls ${s3FullPath} --endpoint-url ${VPC_ENDPOINT} --region us-east-1 2>&1 || true)
+                                if echo "\$S3_OUTPUT" | grep -q "${s3Key}"; then
+                                    echo "Package ${s3Key} already exists, skipping upload"
+                                else
+                                    ${AWS_CLI_PATH} s3 cp ${LIBS_DIR} s3://${DESTINATION_BUCKET_LIB}/${DESTINATION_FOLDER_LIB_311} --endpoint-url ${VPC_ENDPOINT} --recursive --region us-east-1
+                                fi
+                                echo "--------------------------PUSH FILES TO S3 END--------------------------"
+                                """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Parse Python 312 Libraries List & Download Libraries') {
+            when {
+                expression { env.run_312_lib_migration == 'true' }
+            }
+            steps {
+                script {
+                    def packageRegistryJsonFile = readFile PYTHON_312_LIB_LISTING_FILE
+                    def packages = new groovy.json.JsonSlurper().parseText(packageRegistryJsonFile)
+
+                    sh """
+                        ls -la /sys_apps_01/python/python3.12.5/bin/
+                        export PYSPARK_PYTHON=/sys_apps_01/python/python3.12.5/bin/python
+                        export PYSPARK_DRIVER_PYTHON=/sys_apps_01/python/python3.12.5/bin/python
+                        printenv
+                        echo $PATH
+                        /sys_apps_01/python/python3.12.5/bin/pip3.12 install -r ./onprem-to-s3-lib/requirements.txt --extra-index-url ${PYPI_INDEX_URL} --trusted-host ${PYPI_TRUSTED_HOST}
+                        /sys_apps_01/python/python3.12.5/bin/pip3.12 install --upgrade wheel setuptools --extra-index-url ${PYPI_INDEX_URL} --trusted-host ${PYPI_TRUSTED_HOST}
+
+                    """
+
+                    packages.each { pkg, obj ->
+                        def version = obj.version
+                        def overwrite = obj.overwrite.toBoolean()
+                        def pkgFileGlob = "${pkg.replace('-', '_')}*${version}*"
+                        sh """
+                        rm -rf ${LIBS_DIR}/*
+                        /sys_apps_01/python/python3.12.5/bin/pip3.12 download ${pkg}==${version} -d ${LIBS_DIR} --extra-index-url ${PYPI_INDEX_URL} --trusted-host ${PYPI_TRUSTED_HOST}
+                        ls -la ${LIBS_DIR}
+                        """
+                        echo "overwrite variable: ${overwrite}"
+
+                        if (overwrite) {
+                        sh """
+                        echo "--------------------------PUSH FILES TO S3 START--------------------------"
+                        set +x
+                        CREDS=\$(${AWS_CLI_PATH} sts assume-role --role-arn ${AWS_ROLE_ARN} --role-session-name JenkinsSession --endpoint-url ${STS_ENDPOINT})
+                        export AWS_ACCESS_KEY_ID=\$(echo \$CREDS | jq -r .Credentials.AccessKeyId)
+                        export AWS_SECRET_ACCESS_KEY=\$(echo \$CREDS | jq -r .Credentials.SecretAccessKey)
+                        export AWS_SESSION_TOKEN=\$(echo \$CREDS | jq -r .Credentials.SessionToken)
+                        ${AWS_CLI_PATH} sts get-caller-identity --endpoint-url ${STS_ENDPOINT} --region us-east-1
+                        set -x
+                        ${AWS_CLI_PATH} s3 cp ${LIBS_DIR} s3://${DESTINATION_BUCKET_LIB}/${DESTINATION_FOLDER_LIB_312} --endpoint-url ${VPC_ENDPOINT} --recursive --region us-east-1
+                        echo "--------------------------PUSH FILES TO S3 END--------------------------"
+                        """
+                        } else {
+                                def rawOutput = sh(
+                                    script: "ls ${LIBS_DIR}/${pkgFileGlob} 2>/dev/null || true",
+                                    returnStdout: true
+                                )
+                                // Check if package already exists
+                                def lsOutput = rawOutput.trim()
+                                def foundFiles = lsOutput.split('\n').findAll { it.trim() != '' }
+                                def localFileName = foundFiles[0]
+                                def s3Key = localFileName.substring(localFileName.lastIndexOf('/') + 1)
+                                def s3FullPath = "s3://${DESTINATION_BUCKET_LIB}/${DESTINATION_FOLDER_LIB_312}/${s3Key}"
+                                sh """
+                                echo "--------------------------PUSH FILES TO S3 START--------------------------"
+                                set +x
+                                CREDS=\$(${AWS_CLI_PATH} sts assume-role --role-arn ${AWS_ROLE_ARN} --role-session-name JenkinsSession --endpoint-url ${STS_ENDPOINT})
+                                export AWS_ACCESS_KEY_ID=\$(echo \$CREDS | jq -r .Credentials.AccessKeyId)
+                                export AWS_SECRET_ACCESS_KEY=\$(echo \$CREDS | jq -r .Credentials.SecretAccessKey)
+                                export AWS_SESSION_TOKEN=\$(echo \$CREDS | jq -r .Credentials.SessionToken)
+                                set -x
+                                ${AWS_CLI_PATH} sts get-caller-identity --endpoint-url ${STS_ENDPOINT} --region us-east-1
+                                S3_OUTPUT=\$(${AWS_CLI_PATH} s3 ls ${s3FullPath} --endpoint-url ${VPC_ENDPOINT} --region us-east-1 2>&1 || true)
+                                if echo "\$S3_OUTPUT" | grep -q "${s3Key}"; then
+                                    echo "Package ${s3Key} already exists, skipping upload"
+                                else
+                                    ${AWS_CLI_PATH} s3 cp ${LIBS_DIR} s3://${DESTINATION_BUCKET_LIB}/${DESTINATION_FOLDER_LIB_312} --endpoint-url ${VPC_ENDPOINT} --recursive --region us-east-1
+                                fi
+                                echo "--------------------------PUSH FILES TO S3 END--------------------------"
+                                """
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                // Define variables that are common to both success and failure cases
+                env.JOB_URL = "${BUILD_URL}"
+                env.REPO_URL = "${GIT_URL}"
+                env.AUTHOR_NAME = 'Team'
+                env.AUTHOR_EMAIL = "${NOTIFICATION_MAIL_ID}"
+                echo 'Variables that are set to both success and failure: JOB_URL, REPO_URL, AUTHOR_NAME, AUTHOR_EMAIL'
+            }
+        }
+
+        success {
+            script {
+                notifyBitbucket(stashServerBaseUrl: "${GIT_URL}", credentialsId: "${GENERIC_CRED}", buildState: 'SUCCESSFUL')
+                def message = """
+                <html>
+                    <body>
+                        <p>Hello ${env.AUTHOR_NAME},</p>
+                        <p>Congratulations, Your build is successful. Here are your jenkins job and repo links.</p>
+                        <ul>
+                            <li>Jenkins Job: <a href='${env.JOB_URL}'>Jenkins job Link</a></li>
+                            <li>DAB Application Repository: <a href='${env.REPO_URL}'>DAB Repository Link</a></li>
+                        </ul>
+                    </body>
+                </html>
+                """
+                mail(body: message,
+                    mimeType: 'text/html',
+                    subject: "Build SUCCESS: ${env.JOB_NAME}-${env.BUILD_NUMBER}",
+                    to: env.AUTHOR_EMAIL)
+                // cc: "anyone@mastercard.com")
+                echo '======== Success email sent ========'
+            }
+        }
+
+        failure {
+            script {
+                notifyBitbucket(stashServerBaseUrl: "${GIT_URL}", credentialsId: "${GENERIC_CRED}", buildState: 'FAILED')
+                def message = """
+                <html>
+                    <body>
+                        <p>Hello ${env.AUTHOR_NAME},</p>
+                        <p>Unfortunately, Your build has failed. Here are your jenkins job and repo links.</p>
+                        <ul>
+                            <li>Jenkins Job: <a href='${env.JOB_URL}'>Jenkins job Link</a></li>
+                            <li>DAB Application Repository: <a href='${env.REPO_URL}'>DAB Repository Link</a></li>
+                        </ul>
+                        <p>Please investigate the issue in order to be able to merge the PR.
+                    </body>
+                </html>
+                """
+                mail(body: message,
+                    mimeType: 'text/html',
+                    subject: "Build FAILURE: ${env.JOB_NAME}-${env.BUILD_NUMBER}",
+                    to: env.AUTHOR_EMAIL)
+                // cc: "anyone@mastercard.com")
+                echo '======== Failure email sent ========'
+            }
+        }
+
+        cleanup {
+            echo 'Performing final cleanup tasks'
+            cleanWs()
+        }
+    }
+}
