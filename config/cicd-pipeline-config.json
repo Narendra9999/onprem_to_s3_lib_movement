@@ -1,0 +1,28 @@
+{
+    "sonar_project_version": "1.0.0",
+    "sonar_quality_gate": "Default",
+
+    "aws_cli_artifactory_url": "https://artifacts.mastercard.int:443/artifactory/archive-internal-stable/com/mastercard/claws/tools",
+    "artifactory_build_version": "1.0.0",
+
+    "pypi_index_url": "https://artifacts.mastercard.int/artifactory/api/pypi/python-internal-stable/simple/",
+    "pypi_trusted_host": "artifacts.mastercard.int",
+
+    "aws_region": "us-east-1",
+    "aws_role_arn": "arn:aws:iam::661124637811:role/edacde-aws-work",
+    "aws_sts_endpoint": "https://vpce-04d7106cddebb677d-vdz2xv28.sts.us-east-1.vpce.amazonaws.com",
+    "aws_vpc_endpoint": "https://bucket.vpce-0b4afcae1721fbab5-jpterg4i.s3.us-east-1.vpce.amazonaws.com",
+
+    "destination_bucket_lib": "edacde-libraries-work-661124637811-us-east-1",
+    "destination_folder_lib_310": "libraries/jenkins_push",
+    "destination_folder_lib_311": "libraries/dip/enc/python/311/python311_all_libs",
+    "destination_folder_lib_312": "libraries/dip/enc/python/312/python312_all_libs",
+    "destination_bucket_art": "edacde-libraries-work-661124637811-us-east-1",
+    "destination_folder_art": "libraries/dip/enc/python/310/python310_all_libs",
+
+    "hcvault_approle_credid": "dbx-hc-vault-app-role-work",
+    "hcvault_key_version": "2",
+    "hcVault_secret_name": "AWS_ACCESS_USER",
+
+    "notification_mail_id": "Vaseem.Mansuri@mastercard.com"
+}
