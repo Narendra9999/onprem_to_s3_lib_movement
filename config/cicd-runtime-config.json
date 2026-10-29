@@ -1,0 +1,6 @@
+{
+  "run_artifact_migration": true,
+  "run_310_lib_migration": false,
+  "run_311_lib_migration": false,
+  "run_312_lib_migration": false
+}
