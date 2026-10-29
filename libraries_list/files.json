@@ -1,0 +1,5 @@
+{
+     "source": "simple-artifactory",
+    "artifactory_base_url": "https://artifacts.mastercard.int/artifactory/api/pypi/python-internal-stable/simple/",
+    "libraries": [ { "package": "mlflow-skinny", "version": "3.10.1", "mtp_id": "60435" } ]
+}
